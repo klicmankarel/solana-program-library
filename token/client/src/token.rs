@@ -3846,4 +3846,76 @@ where
         )
         .await
     }
+
+    /// Initialize token-group on a mint
+    pub async fn token_group_initialize<S: Signers>(
+        &self,
+        mint_authority: &Pubkey,
+        update_authority: &Pubkey,
+        max_size: u32,
+        signing_keypairs: &S,
+    ) -> TokenResult<T::Output> {
+        self.process_ixs(
+            &[spl_token_group_interface::instruction::initialize_group(
+                &self.program_id,
+                &self.pubkey,
+                &self.pubkey,
+                mint_authority,
+                Some(*update_authority),
+                max_size,
+            )],
+            signing_keypairs,
+        )
+        .await
+    }
+
+    async fn get_additional_rent_for_new_group(&self) -> TokenResult<u64> {
+        let account = self.get_account(self.pubkey).await?;
+        let account_lamports = account.lamports;
+        let mint_state = self.unpack_mint_info(account)?;
+        let new_account_len = mint_state
+            .try_get_account_len()?
+            .checked_add(ExtensionType::try_calculate_account_len::<Mint>(&[
+                ExtensionType::TokenGroup,
+            ])?)
+            .ok_or(TokenError::Program(
+                spl_token_2022::error::TokenError::Overflow.into(),
+            ))?;
+        let new_rent_exempt_minimum = self
+            .client
+            .get_minimum_balance_for_rent_exemption(new_account_len)
+            .await
+            .map_err(TokenError::Client)?;
+        Ok(new_rent_exempt_minimum.saturating_sub(account_lamports))
+    }
+
+    /// Initialize token-group on a mint
+    #[allow(clippy::too_many_arguments)]
+    pub async fn token_group_initialize_with_rent_transfer<S: Signers>(
+        &self,
+        payer: &Pubkey,
+        mint_authority: &Pubkey,
+        update_authority: &Pubkey,
+        max_size: u32,
+        signing_keypairs: &S,
+    ) -> TokenResult<T::Output> {
+        let additional_lamports = self.get_additional_rent_for_new_group().await?;
+        let mut instructions = vec![];
+        if additional_lamports > 0 {
+            instructions.push(system_instruction::transfer(
+                payer,
+                &self.pubkey,
+                additional_lamports,
+            ));
+        }
+        instructions.push(spl_token_group_interface::instruction::initialize_group(
+            &self.program_id,
+            &self.pubkey,
+            &self.pubkey,
+            mint_authority,
+            Some(*update_authority),
+            max_size,
+        ));
+        self.process_ixs(&instructions, signing_keypairs).await
+    }
 }
