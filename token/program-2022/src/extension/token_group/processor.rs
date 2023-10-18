@@ -18,9 +18,10 @@ use {
         program_option::COption,
         pubkey::Pubkey,
     },
+    spl_pod::optional_keys::OptionalNonZeroPubkey,
     spl_token_group_interface::{
         error::TokenGroupError,
-        instruction::{InitializeGroup, TokenGroupInstruction},
+        instruction::{InitializeGroup, TokenGroupInstruction, UpdateGroupMaxSize},
         state::TokenGroup,
     },
 };
@@ -32,6 +33,21 @@ fn realloc_mint(mint_info: &AccountInfo, extension: ExtensionType) -> Result<(),
         .checked_add(extension_len)
         .ok_or::<ProgramError>(TokenError::Overflow.into())?;
     mint_info.realloc(new_account_len, false)?;
+    Ok(())
+}
+
+fn check_update_authority(
+    update_authority_info: &AccountInfo,
+    expected_update_authority: &OptionalNonZeroPubkey,
+) -> Result<(), ProgramError> {
+    if !update_authority_info.is_signer {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let update_authority = Option::<Pubkey>::from(*expected_update_authority)
+        .ok_or(TokenGroupError::ImmutableGroup)?;
+    if update_authority != *update_authority_info.key {
+        return Err(TokenGroupError::IncorrectUpdateAuthority.into());
+    }
     Ok(())
 }
 
@@ -91,6 +107,30 @@ pub fn process_initialize_group(
     Ok(())
 }
 
+/// Processes an
+/// [UpdateGroupMaxSize](enum.GroupInterfaceInstruction.html)
+/// instruction
+pub fn process_update_group_max_size(
+    _program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: UpdateGroupMaxSize,
+) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+
+    let group_info = next_account_info(account_info_iter)?;
+    let update_authority_info = next_account_info(account_info_iter)?;
+
+    let mut buffer = group_info.try_borrow_mut_data()?;
+    let mut state = StateWithExtensionsMut::<Mint>::unpack(&mut buffer)?;
+    let group = state.get_extension_mut::<TokenGroup>()?;
+
+    check_update_authority(update_authority_info, &group.update_authority)?;
+
+    group.update_max_size(data.max_size.into())?;
+
+    Ok(())
+}
+
 /// Processes an [Instruction](enum.Instruction.html).
 pub fn process_instruction(
     program_id: &Pubkey,
@@ -101,6 +141,10 @@ pub fn process_instruction(
         TokenGroupInstruction::InitializeGroup(data) => {
             msg!("TokenGroupInstruction: InitializeGroup");
             process_initialize_group(program_id, accounts, data)
+        }
+        TokenGroupInstruction::UpdateGroupMaxSize(data) => {
+            msg!("TokenGroupInstruction: UpdateGroupMaxSize");
+            process_update_group_max_size(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }
